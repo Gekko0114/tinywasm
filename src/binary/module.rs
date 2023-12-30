@@ -1,4 +1,11 @@
-
+use super::{section::*, types::*};
+use anyhow::{bail, Result};
+use num_traits::FromPrimitive;
+use std::io;
+use std::{
+    io::{BufRead, BufReader, Read},
+    u8,
+};
 
 // https://www.w3.org/TR/wasm-core-1/#modules%E2%91%A0%E2%93%AA
 #[derive(Debug, Default)]
@@ -17,6 +24,29 @@ pub struct Module {
     pub element_section: Option<Vec<Element>>,
     pub data: Option<Vec<Data>>,
     pub code_section: Option<Vec<FunctionBody>>,
+}
+
+impl Module {
+    pub fn add_section(&mut self, section: Section) {
+        match section {
+            Section::Custom(section) => self.custom_section = Some(section),
+            Section::Type(section) => self.type_section = Some(section),
+            Section::Import(section) => self.import_section = Some(section),
+            Section::Function(section) => self.function_section = Some(section),
+            Section::Table(section) => self.table_section = Some(section),
+            Section::Memory(section) => self.memory_section = Some(section),
+            Section::Global(section) => self.global_section = Some(section),
+            Section::Export(section) => self.export_section = Some(section),
+            Section::Code(section) => self.code_section = Some(section),
+            Section::Element(section) => self.element_section = Some(section),
+            Section::Data(section) => self.data = Some(section),
+            Section::Start(section) => self.start_section = Some(section),            
+        };
+    }
+}
+
+pub struct Decoder<R> {
+    reader: BufReader<R>,
 }
 
 impl<R: io::Read> Decoder<R> {

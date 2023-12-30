@@ -1,3 +1,20 @@
+use super::{error::Error, module::*, value::Value};
+use crate::{
+    binary::{
+        module::{Decoder, Module},
+        types::{Expr, ExprValue, FuncType, Mutability},
+    },
+    Importer,
+};
+use anyhow::{bail, Context, Result};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fs,
+    io::{Cursor, Read},
+    rc::Rc,
+};
+
 #[derive(Debug)]
 pub enum Exports {
     Func(FuncInst),

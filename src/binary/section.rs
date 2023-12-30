@@ -1,3 +1,128 @@
+#![allow(clippy::needless_range_loop)]
+
+use super::error::Error;
+use super::instruction::{Instruction, MemoryArg, Opcode};
+use super::types::*;
+use anyhow::{bail, Context as _, Result};
+use num_derive::FromPrimitive;
+use num_traits::FromPrimitive as _;
+use std::io::{BufRead, Cursor, Read};
+
+#[derive(Debug, PartialEq, Eq, FromPrimitive)]
+pub enum SectionID {
+    Custom = 0x00,
+    Type = 0x01,
+    Import = 0x02,
+    Function = 0x03,
+    Table = 0x04,
+    Memory = 0x05,
+    Global = 0x06,
+    Export = 0x07,
+    Start = 0x08,
+    Element = 0x09,
+    Code = 0x0a,
+    Data = 0x0b,
+}
+
+impl From<u8> for SectionID {
+    fn from(id: u8) -> Self {
+        match id {
+            0x00 => SectionID::Custom,
+            0x01 => SectionID::Type,
+            0x02 => SectionID::Import,
+            0x03 => SectionID::Function,
+            0x04 => SectionID::Table,
+            0x05 => SectionID::Memory,
+            0x06 => SectionID::Global,
+            0x07 => SectionID::Export,
+            0x08 => SectionID::Start,
+            0x09 => SectionID::Element,
+            0x0b => SectionID::Data,
+            0x0a => SectionID::Code,
+            _ => panic!("unknown section id: {}", id),            
+        }
+    }
+}
+
+pub struct SectionReader<'a> {
+    buf: Cursor<&'a [u8]>,
+}
+
+impl<'a> SectionReader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self {
+            buf: Cursor::new(buf),
+        }        
+    }
+
+    fn byte(&mut self) -> Result<u8> {
+        let mut buf = [0u8; 1];
+        self.buf.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        let num = leb128::read::unsigned(&mut self.buf)?;
+        let num = u32::try_from(num)?;
+        Ok(num)
+    }
+
+    fn f32(&mut self) -> Result<f32> {
+        let buf = &mut [0u8; 4];
+        self.buf.read_exact(buf)?;
+        Ok(f32::from_le_bytes(*buf))
+    }
+
+    fn f64(&mut self) -> Result<f64> {
+        let buf = &mut [0u8; 8];
+        self.buf.read_exact(buf)?;
+        Ok(f64::from_le_bytes(*buf))
+    }
+
+    fn i32(&mut self) -> Result<i32> {
+        let num = leb128::read::signed(&mut self.buf)?;
+        let num = i32::try_from(num)?;
+        Ok(num)
+    }
+
+    fn i64(&mut self) -> Result<i64> {
+        let num = leb128::read::signed(&mut self.buf)?;
+        Ok(num)
+    }
+
+    fn bytes(&mut self, num: usize) -> Result<Vec<u8>> {
+        let mut buf = vec![0i8; num];
+        self.buf.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn string(&mut self, size: usize) -> Result<String> {
+        let bytes = self.bytes(size)?;
+        let string = String::from_utf8(bytes)?;
+        Ok(string)
+    }
+
+    fn is_end(&mut self) -> Result<bool> {
+        Ok(self.buf.fill_buf().map(|b| !b.is_empty())?)
+    }
+}
+
+#[derive(Debug)]
+pub enum Section {
+    Custom(Custom),
+    Type(Vec<FuncType>),
+    Import(Vec<Import>),
+    Function(Vec<u32>),
+    Table(Vec<Table>),
+    Memory(Vec<Memory>),
+    Global(Vec<Global>),
+    Export(Vec<Export>),
+    Start(u32),
+    Element(Vec<Element>),
+    Data(Vec<Data>),
+    Code(Vec<FunctionBody>),
+}
+
 pub fn decode(id: SectionID, data: &[u8]) -> Result<Section> {
     let mut reader = SectionReader::new(data);
     let section = match id {
@@ -359,7 +484,7 @@ fn decode_instruction(reader: &mut SectionReader) -> Result<Instruction> {
         Opcode::Unreachable => Instruction::Unreachable,
         Opcode::Nop => Instruction::Nop,
         Opcode::Block => Instruction::Block(decode_block(reader)?),
-        Opcode::Loop => Instrcution::Loop(decode_block(reader)?),
+        Opcode::Loop => Instruction::Loop(decode_block(reader)?),
         Opcode::If => Instruction::If(decode_block(reader)?),
         Opcode::Else => Instruction::Else,
         Opcode::End => Instruction::End,
@@ -377,13 +502,13 @@ fn decode_instruction(reader: &mut SectionReader) -> Result<Instruction> {
         }
         Opcode::Call => {
             let local_idx = reader.u32()?;
-            Instrcution::Call(local_idx)
+            Instruction::Call(local_idx)
         }
         Opcode::CallIndirect => Instruction::CallIndirect((reader.u32()?, reader.u32()?)),
         Opcode::Return => Instruction::Return,
         Opcode::LocalGet => {
             let local_idx = reader.u32()?;
-            Instrcution::LocalGet(local_idx)
+            Instruction::LocalGet(local_idx)
         }
         Opcode::LocalSet => Instruction::LocalSet(reader.u32()?),
         Opcode::LocalTee => Instruction::LocalTee(reader.u32()?),
@@ -583,4 +708,12 @@ fn decode_instruction(reader: &mut SectionReader) -> Result<Instruction> {
         Opcode::F64ReinterpretI64 => Instruction::F64ReinterpretI64,        
     };
     Ok(inst)
+}
+
+fn read_memory_arg(reader: &mut SectionReader) -> Result<MemoryArg> {
+    let arg = MemoryArg {
+        align: reader.u32()?,
+        offset: reader.u32()?,
+    };
+    Ok(arg)
 }
