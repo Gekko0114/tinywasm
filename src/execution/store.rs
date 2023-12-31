@@ -80,7 +80,7 @@ impl Store {
                     .filter(|importer| importer.name() == module_name)
                     .collect();
                 if importers.is_empty() {
-                    bail!("not found import module: [}", module_name);
+                    bail!("not found import module: {}", module_name);
                 }
                 let importer = importers.get(0).unwrap();
 
@@ -115,5 +115,152 @@ impl Store {
                 }
             }
         }
+        if let Some(ref section) = module.global_section {
+            for global in section {
+                let value = match global.init_expr {
+                    ExprValue::I32(v) => Value::I32(v),
+                    ExprValue::I64(v) => Value::I64(v),
+                    ExprValue::F32(v) => Value::F32(v),
+                    ExprValue::F64(v) => Value::F64(v),                    
+                };
+                let global = InternalGlobalInst {
+                    value,
+                    mutability: global.global_type.mutability == Mutability::Var,
+                };
+                globals.push(Rc::new(RefCell::new(global)));
+            }
+        }
+        if let Some(ref code_section) = module.code_section {
+            if code_section.len() != func_type_idxs.len() {
+                bail!("code section length must be equal to function section length");
+            }
+            for (func_body, typeidx) in code_section.iter().zip(func_type_idxs.iter()) {
+                let func_type = module
+                    .type_section
+                    .as_ref()
+                    .with_context(|| "cannot get type section")?
+                    .get(*typeidx as usize)
+                    .with_context(|| "cannot get func type from type section")?
+                    .clone();
+
+                let mut locals = Vec::with_capacity(func_body.locals.len());
+                for local in func_body.locals.iter() {
+                    for _ in 0..local.type_count {
+                        locals.push(local.value_type.clone());
+                    }
+                }
+
+                let func = InternalFuncInst {
+                    func_type,
+                    code: Func {
+                        type_idx: *typeidx,
+                        locals,
+                        body: func_body.code.clone(),
+                    },
+                };
+                funcs.push(FuncInst::Internal(func));
+            }
+        }
+        if let Some(ref section) = module.memory_section {
+            for memory in section {
+                let min = memory.limits.min * PAGE_SIZE;
+                let memory = InternalMemoryInst {
+                    data: vec![0; min as usize],
+                    max: memory.limits.max,
+                };
+                memories.push(Rc::new(RefCell::new(memory)));
+            }
+        }
+
+        let eval = |globals: &Vec<GlobalInst>, offset: Expr| -> Result<usize> {
+            match offset {
+                Expr::Value(value) => Ok(i32;:from(value) as usize),
+                Expr::GlobalIndex(idx) => {
+                    let global = globals
+                        .get(idx)
+                        .with_context(|| "not found offset from globals")?
+                        .borrow();
+                    Ok(i32::from(global.value.clone()) as usize)
+                }
+            }
+        };
+
+        let update_funcs_in_table = |entries: &mut Vec<Option<FuncInst>>| -> Result<()> {
+            if let Some(elems) = module.element_section.as_ref() {
+                for elem in elems {
+                    let offset = eval(&globals, elem.offset.clone())?;
+                    if entries.len() <= offset {
+                        entries.resize(entries.len() + offset + elem.init.len(), None);
+                    }
+                    for (i, func_idx) in elem.init.iter().enumerate() {
+                        let func = funcs
+                            .get(*func_idx as usize)
+                            .with_context(|| format!("not found function by {func_idx}"))?;
+                        entries[offset + i] = Some(func.clone());
+                    }
+                }
+            };
+            Ok(())
+        };
+
+        if let Some(ref table_section) = module.table_section {
+            let table = table_section
+                .get(0)
+                .with_context(|| "cannot get table from table section")?;
+            let min = table.limits.min as usize;
+
+            let mut entries = vec![None; min];
+            update_funcs_in_table(&mut entries)?;
+            let table_inst = InternalTableInst {
+                funcs: entries,
+                max: table.limits.max,
+            };
+            tables.push(Rc::new(RefCell::new(table_inst)));
+        } else {
+            if !tables.is_empty() {
+                let entries = &mut tables
+                    .first()
+                    .with_context(|| "not found table")?
+                    .borrow_mut()
+                    .funcs;
+                update_funcs_in_table(entries)?;
+            }
+        }
+
+        if let Some(ref data_list) = module.data {
+            for data in data_list {
+                let offset = eval(&globals, data.offset.clone())?;
+                let init_data = &data.init;
+                let mut memory = memories
+                    .get(data.memory_index as usize)
+                    .with_context(|| "not found memory")?
+                    .borrow_mut();
+                if offset + init_data.len() > memory.data.len() {
+                    bail!("data is too large to fit in memory");
+                }
+                memory.data[offset..offset + init_data.len()].copy_from_slice(init_data);
+            }
+        }
+        let module_inst = ModuleInst::allocate(module);
+        let imports = if let Some(imports) = importers {
+            let mut map = HashMap::new();
+            for importer in imports {
+                map.insert(importer.name().to_string(), importer);
+            }
+            Some(map)
+        } else {
+            None
+        };
+
+        let store = Self {
+            funcs,
+            tables,
+            memory: memories,
+            globals,
+            imports,
+            module: module_inst,
+            start: module.start_section,
+        };
+        Ok(store)
     }
 }
